@@ -9,6 +9,7 @@
 #include <vector>
 #include <sstream>
 #include <functional>
+#include <bits/unique_ptr.h>
 
 class v4ldev {
     int fd;
@@ -68,127 +69,162 @@ void throw_perror(function<void (stringstream & s)> f) {
     throw runtime_error(s.str());
 }
 
-void capture(string from, string to) {
-    v4ldev dev(from.c_str());
+class capturer {
+    static const int nbuffers = 30;
 
-    if (!dev.opened()) {
-        throw_perror([&from](auto &s) {
-            s << "Failed to open " << from;
-        });
-    }
+    unique_ptr<v4ldev> pdev;
+    void *buffers[nbuffers];
 
-    struct v4l2_capability cap;
-    if (dev.xioctl(VIDIOC_QUERYCAP, &cap) == -1) {
-        throw_perror([&from](auto &s) {
-            if (EINVAL == errno) {
-                s << from << " is no V4L2 device";
-            } else {
-                s << "Failed to query capabilities of " << from;
+public:
+    void open(string from) {
+        pdev = make_unique<v4ldev>(from.c_str());
+        if (!pdev->opened()) {
+            pdev.release();
+            throw_perror([&from](auto &s) {
+                s << "Failed to open " << from;
+            });
+        }
+        v4ldev &dev = *pdev;
+        struct v4l2_capability cap;
+        if (dev.xioctl(VIDIOC_QUERYCAP, &cap) == -1) {
+            throw_perror([&from](auto &s) {
+                if (EINVAL == errno) {
+                    s << from << " is no V4L2 device";
+                } else {
+                    s << "Failed to query capabilities of " << from;
+                }
+            });
+        }
+
+        if (cap.capabilities  & V4L2_CAP_VIDEO_CAPTURE) {
+            //std::cout << "Can capture video" << std::endl;
+        }
+
+        struct v4l2_format fmt = {0};
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        fmt.fmt.pix.width = 640;
+        fmt.fmt.pix.height = 480;
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; // V4L2_PIX_FMT_MJPEG; // V4L2_PIX_FMT_SGRBG10;
+        fmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+        if (dev.xioctl(VIDIOC_S_FMT, &fmt) == -1)
+        {
+            throw_perror([&from](auto &s) {
+                s << "Failed to set pixel format for " << from;
+            });
+        }
+
+        struct v4l2_requestbuffers req = {0};
+        req.count = nbuffers;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        req.memory = V4L2_MEMORY_MMAP;
+
+        if (dev.xioctl(VIDIOC_REQBUFS, &req) == -1)
+        {
+            throw_perror([&from](auto &s) {
+                s << "Failed to request buffer for " << from;
+            });
+        }
+        //std::cout << "buffers requested " << req.count << std::endl;
+
+        if (req.count > nbuffers) {
+            throw_perror([&req](auto &s) {
+                s << "Got " << req.count << " buffers instead of 4";
+            });
+        }
+
+        for (int i = 0; i < req.count; i++) {
+            struct v4l2_buffer buf = {0};
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = i;
+            if (dev.xioctl(VIDIOC_QBUF, &buf) == -1)
+            {
+                throw_perror([i](auto &s) {
+                    s << "Failed to request buffer " << i;
+                });
             }
-        });
+            buffers[i] = dev.map(buf);
+        }
+
+        enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if(dev.xioctl(VIDIOC_STREAMON, &type) == -1)
+        {
+            throw_perror([&from](auto &s) {
+                s << "Failed to start capturing from " << from;
+            });
+        }
     }
 
-    if (cap.capabilities  & V4L2_CAP_VIDEO_CAPTURE) {
-        //std::cout << "Can capture video" << std::endl;
-    }
+    void grab(vector<char> &frame) {
+        if (!pdev) {
+            throw_perror([](auto &s) {
+                s << "Device is not opened";
+            });
+        }
+        v4ldev &dev = *pdev;
+        int r = dev.sel();
+        if(-1 == r)
+        {
+            throw_perror([](auto &s) {
+                s << "Waiting frame failed";
+            });
+        }
 
-    struct v4l2_format fmt = {0};
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = 640;
-    fmt.fmt.pix.height = 480;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; // V4L2_PIX_FMT_MJPEG; // V4L2_PIX_FMT_SGRBG10;
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
-
-    if (dev.xioctl(VIDIOC_S_FMT, &fmt) == -1)
-    {
-        throw_perror([&from](auto &s) {
-            s << "Failed to set pixel format for " << from;
-        });
-    }
-
-    struct v4l2_requestbuffers req = {0};
-    req.count = 4;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
-
-    if (dev.xioctl(VIDIOC_REQBUFS, &req) == -1)
-    {
-        throw_perror([&from](auto &s) {
-            s << "Failed to request buffer for " << from;
-        });
-    }
-    //std::cout << "buffers requested " << req.count << std::endl;
-
-    if (req.count > 4) {
-        throw_perror([&req](auto &s) {
-            s << "Got " << req.count << " buffers instead of 4";
-        });
-    }
-
-    void *buffers[4];
-    for (int i = 0; i < req.count; i++) {
         struct v4l2_buffer buf = {0};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        if (dev.xioctl(VIDIOC_QBUF, &buf) == -1)
+        r = dev.xioctl(VIDIOC_DQBUF, &buf);
+        if(-1 == r)
         {
-            throw_perror([i](auto &s) {
-                s << "Failed to request buffer " << i;
+            throw_perror([](auto &s) {
+                s << "Failed to retrieve frame";
             });
         }
-        buffers[i] = dev.map(buf);
+
+        std::cout << "buffer " << buf.index << ", bytes " << buf.bytesused << std::endl;
+
+        char *p = (char *)buffers[buf.index];
+        frame.resize(buf.bytesused / 2);
+        for (int i = 0; i < frame.size(); i++) {
+            frame[i] = p[i * 2];
+        }
+
+        r = dev.xioctl(VIDIOC_QBUF, &buf);
+        if(-1 == r)
+        {
+            throw_perror([](auto &s) {
+                s << "Failed to free frame buffer";
+            });
+        }
     }
+};
 
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if(dev.xioctl(VIDIOC_STREAMON, &type) == -1)
-    {
-        throw_perror([&from](auto &s) {
-            s << "Failed to start capturing from " << from;
-        });
+void capture(string from, int frames, int start, int each, string to) {
+    std::vector<char> decoded(640 * 480);
+    capturer cap;
+    cap.open(from);
+    for (int i = 0; i < frames; i++) {
+        cap.grab(decoded);
+        ofstream f;
+        stringstream name(to);
+        name << to << start + i % each << ".pgm";
+        cout << "frame " << name.str() << ", bytes " << decoded.size() << std::endl;
+        f.open(name.str(), std::ios::binary | std::ios::trunc);
+        f << "P5 640 480 255 ";
+        f.write(decoded.data(), decoded.size());
+        f.close();
     }
-
-    int r = dev.sel();
-    if(-1 == r)
-    {
-        throw_perror([](auto &s) {
-            s << "Waiting frame failed";
-        });
-    }
-
-    struct v4l2_buffer buf = {0};
-    //for (int i = 0; i < 10; i++) {
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        r = dev.xioctl(VIDIOC_DQBUF, &buf);
-    //    if (-1 != r) break;
-    //}
-    if(-1 == r)
-    {
-        throw_perror([](auto &s) {
-            s << "Failed to retrieve frame";
-        });
-    }
-
-    //std::cout << "buffer " << buf.index << ", bytes " << buf.bytesused << std::endl;
-
-    char *p = (char *)buffers[buf.index];
-    std::vector<char> decoded(buf.bytesused / 2);
-    for (int i = 0; i < decoded.size(); i++) {
-        decoded[i] = p[i * 2];
-    }
-
-    std::ofstream f;
-    f.open(to, std::ios::binary | std::ios::trunc);
-    f << "P5 640 480 255 ";
-    f.write(decoded.data(), decoded.size());//buf.bytesused);
-    f.close();
 }
 
 int main(int argc, char *argv[]) {
     string path = argc > 1 ? argv[1] : "/dev/video0";
+    int frames = argc > 2 ? atoi(argv[2]) : 25 * 60;
+    int start = argc > 3 ? atoi(argv[3]) : 100;
+    int each = argc > 4 ? atoi(argv[4]) : 40;
+    string pref = argc > 5 ? argv[5] : "frame";
     try {
-        capture(path, "frame.pgm");
+        capture(path, frames, start, each, pref);
         return 0;
     } catch(runtime_error & e) {
         cerr << e.what() << endl;
