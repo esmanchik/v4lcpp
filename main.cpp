@@ -156,6 +156,48 @@ public:
         }
     }
 
+    #define CLIP(X) ( (X) > 255 ? 255 : (X) < 0 ? 0 : X)
+
+    // YUV -> RGB
+    #define C(Y) ( (Y) - 16  )
+    #define D(U) ( (U) - 128 )
+    #define E(V) ( (V) - 128 )
+
+    #define YUV2R(Y, U, V) CLIP(( 298 * C(Y)              + 409 * E(V) + 128) >> 8)
+    #define YUV2G(Y, U, V) CLIP(( 298 * C(Y) - 100 * D(U) - 208 * E(V) + 128) >> 8)
+    #define YUV2B(Y, U, V) CLIP(( 298 * C(Y) + 516 * D(U)              + 128) >> 8)
+
+    void decode_rgb(unsigned char *yuv, int n, vector<char> &rgb) {
+        rgb.resize(n * 6 / 4);
+        for (int i = 0, j = 0; i < n; i+=4) {
+            int u  = yuv[i + 1];
+            int y1 = yuv[i];
+            int v  = yuv[i + 3];
+            int y2 = yuv[i + 2];
+            int r = YUV2R(y1, u, v);
+            int g = YUV2G(y1, u, v);
+            int b = YUV2B(y1, u, v);
+            rgb[j] = r;
+            rgb[j + 1] = g;
+            rgb[j + 2] = b;
+            r = YUV2R(y2, u, v);
+            g = YUV2G(y2, u, v);
+            b = YUV2B(y2, u, v);
+            j += 3;
+            rgb[j] = r;
+            rgb[j + 1] = g;
+            rgb[j + 2] = b;
+            j += 3;
+        }
+    }
+
+    void decode_mono(char *yuv, int n, vector<char> &frame) {
+        frame.resize(n / 2);
+        for (int i = 0; i < frame.size(); i++) {
+            frame[i] = yuv[i * 2];
+        }
+    }
+
     void grab(vector<char> &frame) {
         if (!pdev) {
             throw_perror([](auto &s) {
@@ -184,11 +226,9 @@ public:
 
         std::cout << "buffer " << buf.index << ", bytes " << buf.bytesused << std::endl;
 
-        char *p = (char *)buffers[buf.index];
-        frame.resize(buf.bytesused / 2);
-        for (int i = 0; i < frame.size(); i++) {
-            frame[i] = p[i * 2];
-        }
+        auto *p = (unsigned char *)buffers[buf.index];
+        //decode_mono(p, buf.bytesused, frame);
+        decode_rgb(p, buf.bytesused, frame);
 
         r = dev.xioctl(VIDIOC_QBUF, &buf);
         if(-1 == r)
@@ -208,10 +248,11 @@ void capture(string from, int frames, int start, int each, string to) {
         cap.grab(decoded);
         ofstream f;
         stringstream name(to);
-        name << to << start + i % each << ".pgm";
+        name << to << start + i % each << ".ppm";
         cout << "frame " << name.str() << ", bytes " << decoded.size() << std::endl;
         f.open(name.str(), std::ios::binary | std::ios::trunc);
-        f << "P5 640 480 255 ";
+        //f << "P5 640 480 255 ";
+        f << "P6\n640 480\n255\n";
         f.write(decoded.data(), decoded.size());
         f.close();
     }
