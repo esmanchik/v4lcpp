@@ -1,6 +1,5 @@
-cmake_minimum_required(VERSION 3.12)
-project(v4lworld)
+project(v4lcpp)
 
 set(CMAKE_CXX_STANDARD 14)
 
-add_executable(v4lworld main.cpp)
+add_executable(v4lcpp main.cpp)
